@@ -7,9 +7,15 @@ pipeline {
       
         environment {
            appName = ""
-           artifactId=""
-           checkoutDir="source"
-           PATH = "/var/lib/jenkins/data/play/play-1.5.0:$PATH"
+           artifactId = ""
+           buildName = "BUILDNAME"
+           checkoutDir = "source"
+           gitSource = "${env.PROJECT_GIT_SOURCE}"
+           gitBranch = "${env.BUILD_GIT_BRANCH}"           
+           gitCredentialsId = "b077c69a-a49a-4e08-8d4f-8ccd5758a851"
+           projectNamespace = "${env.PROJECT_NAME}"
+           projectPrefix = "${env.PROJECT_PREFIX}"
+           PATH = "/var/lib/jenkins/data/play/play-1.5.0:$PATH"           
         } 
     
         stages {            
@@ -25,9 +31,9 @@ pipeline {
 
             stage('Checkout GitSCM') {
                 steps {                    
-                    sh "if [ -d \"$checkoutDir\" ]; then rm -Rf $checkoutDir; fi"                    
+                    sh "if [ -d \"$checkoutDir\" ]; then rm -Rf $checkoutDir; fi"
                     dir ("$checkoutDir") {
-                        git url: "${env.PROJECT_GIT_SOURCE}", branch: "${env.BUILD_GIT_BRANCH}", credentialsId:'b077c69a-a49a-4e08-8d4f-8ccd5758a851'
+                        git url: "$gitSource", branch: "$gitBranch", credentialsId:"$gitCredentialsId"
                                                 
                         script {
                             artifactId=sh(
@@ -35,7 +41,8 @@ pipeline {
                                 returnStdout: true
                             ).trim()
 
-                            appName="splus-$artifactId" 
+                            appName="$projectPrefix-$artifactId" 
+                            buildName="${appName}-play-docker"
                         }
                     
                        println "${appName}"
@@ -45,6 +52,7 @@ pipeline {
             }
 
             stage('Build Artifact') {
+                when { expression { env.USE_CACHED == null } }
                steps {
                    dir ("$checkoutDir") {
                        sh 'mvn clean package'
@@ -57,25 +65,61 @@ pipeline {
             }
 
             stage('Build Docker Images') {
-              steps{                  
+              steps{ 
                   dir ("$checkoutDir") {
-                      script {
-                       jsonYaml= sh(script: """
-                       sed -e 's/<NAMESPACE>/${env.PROJECT_NAME}/g' -e 's/<BUILD_NAME>/${appName}-play-docker/g' -e 's/<SERVICE_NAME>/${artifactId}/g' /var/lib/jenkins/data/oc/play-app-docker.yaml
-                       """,
-                       returnStdout: true)
-                       println "${jsonYaml}" 
-                       //openshiftCreateResource namespace: env.PROJECT_NAME, verbose: 'true', 
-                    }
+                      dir("docker") {
+                        script {                           
+                            sh """
+                            sed -e 's/<NAMESPACE>/${projectNamespace}/g' -e 's/<BUILD_NAME>/${buildName}/g' -e 's/<SERVICE_NAME>/${artifactId}/g' /var/lib/jenkins/data/oc/play-app-docker.yaml  > play-app-docker.yaml
+                            """
+                            def bc = readYaml file: 'play-app-docker.yaml'
+                            openshift.withCluster() {
+                                openshift.withProject("${projectNamespace}") {
+                                   def objs = openshift.selector('bc',"${buildName}")
+                                   if (!objs.exists()) {
+                                     objs = openshift.create(bc)
+                                   }
+                                   objs.startBuild("--from-file=.", "--wait")
+                                }
+                            }
+                        }
+                      }
                   }
-                  //openshiftVerifyBuild bldCfg: "splus-${env.POM_ARTIFACT_ID}-docker", namespace: env.PROJECT_NAME
               }
             }
 
             stage('Deploy Docker Images') {
                  steps {
-                    echo "${appName}"
+                    echo "Deploy ${appName} ..."
+                    script {
+                       openshift.withCluster() {
+                            openshift.withProject("${projectNamespace}") {
+                                openshift.raw("rollout latest dc/${appName}")
+                                def latestDeploymentVersion = openshift.selector('dc',"${appName}").object().status.latestVersion
+                                def rc = openshift.selector('rc', "${appName}-${latestDeploymentVersion}")
+                                rc.untilEach(1){
+                                    def rcMap = it.object()
+                                    return (rcMap.status.replicas.equals(rcMap.status.readyReplicas))
+                                }
+                            }
+                        }
+                    }
                  }
+            }
+
+            stage('Clean Up') {
+                steps {
+                    script {
+                        openshift.withCluster() {
+                            openshift.withProject("${projectNamespace}") {
+                                def objs = openshift.selector('bc',"${buildName}")
+                                if (objs.exists()) {
+                                     objs.delete()
+                                }                                
+                            }
+                        }
+                    }
+                }
             }
         }
 }
