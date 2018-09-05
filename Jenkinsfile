@@ -1,5 +1,10 @@
 pipeline {
        agent { label "${env.PROJECT_JENKIN_AGENT}" }
+
+       options {
+          ansiColor('xterm')
+       }
+
        tools {
         maven 'Maven-3.5.3'
         jdk 'jdk8'       
@@ -12,7 +17,7 @@ pipeline {
            checkoutDir = "source"
            gitSource = "${env.PROJECT_GIT_SOURCE}"
            gitBranch = "${env.BUILD_GIT_BRANCH}"           
-           gitCredentialsId = "b077c69a-a49a-4e08-8d4f-8ccd5758a851"
+           gitCredentialsId = "${env.GIT_CREDENTIALS_ID}"
            projectNamespace = "${env.PROJECT_NAME}"
            projectPrefix = "${env.PROJECT_PREFIX}"
            PATH = "/var/lib/jenkins/data/play/play-1.5.0:$PATH"           
@@ -21,8 +26,7 @@ pipeline {
         stages {            
             stage ('Initialize') {
                 steps {
-                sh '''
-                    echo "PATH = ${PATH}"
+                sh '''                    
                     cp /var/lib/jenkins/data/conf.d/ivysettings.xml ${HOME}/.ivy2/ivysettings.xml
                     cp /var/lib/jenkins/data/conf.d/settings.xml ${HOME}/.m2/settings.xml
                 '''
@@ -30,6 +34,7 @@ pipeline {
             }
 
             stage('Checkout GitSCM') {
+                when { expression { gitCredentialsId != null } }
                 steps {                    
                     sh "if [ -d \"$checkoutDir\" ]; then rm -Rf $checkoutDir; fi"
                     dir ("$checkoutDir") {
@@ -52,7 +57,7 @@ pipeline {
             }
 
             stage('Build Artifact') {
-                when { expression { env.USE_CACHED == null } }
+               when { expression { env.USE_CACHED == null } }
                steps {
                    dir ("$checkoutDir") {
                        sh 'mvn clean package'
@@ -65,6 +70,7 @@ pipeline {
             }
 
             stage('Build Docker Images') {
+              when { expression { appName != "" } }  
               steps{ 
                   dir ("$checkoutDir") {
                       dir("docker") {
